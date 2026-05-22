@@ -4,35 +4,7 @@ import random
 import requests
 import spotipy
 
-CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
-CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
-REFRESH_TOKEN = os.getenv("SPOTIFY_REFRESH_TOKEN")
-
-
-def get_access_token():
-    url = "https://accounts.spotify.com/api/token"
-
-    auth = base64.b64encode(
-        f"{CLIENT_ID}:{CLIENT_SECRET}".encode()
-    ).decode()
-
-    headers = {
-        "Authorization": f"Basic {auth}",
-        "Content-Type": "application/x-www-form-urlencoded"
-    }
-
-    data = {
-        "grant_type": "refresh_token",
-        "refresh_token": REFRESH_TOKEN
-    }
-
-    r = requests.post(url, headers=headers, data=data)
-    r.raise_for_status()
-
-    return r.json()["access_token"]
-
-access_token = get_access_token()
-sp = spotipy.Spotify(auth=access_token)
+from spotipy.oauth2 import SpotifyOAuth
 
 LASTFM_API_KEY = os.getenv("LASTFM_API_KEY")
 LASTFM_USERNAME = os.getenv("LASTFM_USERNAME")
@@ -49,9 +21,21 @@ scope = (
     "user-library-read"
 )
 
+auth_manager = SpotifyOAuth(
+    client_id=os.getenv("SPOTIFY_CLIENT_ID"),
+    client_secret=os.getenv("SPOTIFY_CLIENT_SECRET"),
+    redirect_uri=os.getenv("SPOTIFY_REDIRECT_URI"),
+    scope=scope,
+    cache_path=None,
+    open_browser=False,
+    show_dialog=False,
+)
 
+refresh_token = os.getenv("SPOTIFY_REFRESH_TOKEN")
 
-sp = spotipy.Spotify(auth_manager=auth_manager)
+token_info = auth_manager.refresh_access_token(refresh_token)
+
+sp = spotipy.Spotify(auth=token_info["access_token"])
 
 
 def get_playlist_id(name):
