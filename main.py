@@ -309,12 +309,9 @@ def add_tracks_to_playlist(playlist_id, track_ids):
     if not track_ids:
         return
 
-    uris = [
-        f"spotify:track:{track_id}"
-        for track_id in track_ids
-    ]
+    print(f"Adding {len(track_ids)} tracks to playlist {playlist_id}")
 
-    for batch in chunked(uris, 100):
+    for batch in chunked(track_ids, 100):
         spotify_call(
             sp.playlist_add_items,
             playlist_id,
@@ -323,49 +320,65 @@ def add_tracks_to_playlist(playlist_id, track_ids):
 
 
 def clear_playlist(playlist_id):
-    print("Loading tracks for cleanup...")
-
     current_tracks = get_playlist_tracks(playlist_id)
 
     if not current_tracks:
         print("Playlist already empty")
         return
 
-    uris = []
+    print(f"Clearing playlist: {len(current_tracks)} tracks")
 
-    for track in current_tracks:
-        uri = track.get("uri")
-
-        if uri:
-            uris.append(uri)
-
-    print(f"Removing {len(uris)} tracks")
-
-    for batch in chunked(uris, 100):
-        spotify_call(
-            sp.playlist_replace_items,
-            playlist_id,
-            [],
-        )
-
-        break
+    spotify_call(
+        sp.playlist_replace_items,
+        playlist_id,
+        [],
+    )
 
     print("Playlist cleared")
 
 
-# ================= START =================
+# ================= STEP 1 =================
+# LOAD CURRENT DISCOVERY TRACKS
 
-print("Loading current playlists...")
+print("Loading current discovery playlist...")
 
 existing_discovery_tracks = get_playlist_tracks(
     DISCOVERY_PLAYLIST_ID
 )
 
 existing_discovery_ids = [
-    track["id"]
+    track["uri"]
     for track in existing_discovery_tracks
-    if track.get("id")
+    if track.get("uri")
 ]
+
+print(f"Current discovery tracks: {len(existing_discovery_ids)}")
+
+# ================= STEP 2 =================
+# ARCHIVE OLD TRACKS
+
+if existing_discovery_ids:
+    print("Archiving tracks to history playlist...")
+
+    add_tracks_to_playlist(
+        HISTORY_PLAYLIST_ID,
+        existing_discovery_ids,
+    )
+
+    print("Archive completed")
+
+else:
+    print("Discovery playlist empty, nothing to archive")
+
+# ================= STEP 3 =================
+# CLEAR DISCOVERY PLAYLIST
+
+print("Clearing discovery playlist...")
+
+clear_playlist(DISCOVERY_PLAYLIST_ID)
+
+# ================= STEP 4 =================
+# BUILD BLACKLIST
 
 history_track_ids = get_playlist_track_ids(
     HISTORY_PLAYLIST_ID
@@ -373,53 +386,14 @@ history_track_ids = get_playlist_track_ids(
 
 liked_tracks = get_liked_tracks()
 
-print(f"Current discovery tracks: {len(existing_discovery_ids)}")
-print(f"History tracks: {len(history_track_ids)}")
-print(f"Liked tracks: {len(liked_tracks)}")
-
-# ================= STEP 1 =================
-# ARCHIVE OLD TRACKS
-
-if existing_discovery_ids:
-    print("Archiving old discovery tracks...")
-
-    archive_tracks = []
-
-    for track_id in existing_discovery_ids:
-        if track_id not in history_track_ids:
-            archive_tracks.append(track_id)
-
-    print(f"Tracks to archive: {len(archive_tracks)}")
-
-    add_tracks_to_playlist(
-        HISTORY_PLAYLIST_ID,
-        archive_tracks,
-    )
-
-    print("Archive completed")
-
-else:
-    print("Discovery playlist empty")
-
-# ================= STEP 2 =================
-# CLEAR DISCOVERY
-
-print("Clearing discovery playlist...")
-
-clear_playlist(DISCOVERY_PLAYLIST_ID)
-
-# ================= STEP 3 =================
-# BUILD BLACKLIST
-
 blacklist = (
-    set(existing_discovery_ids)
-    | history_track_ids
+    history_track_ids
     | liked_tracks
 )
 
 print(f"Blacklist size: {len(blacklist)}")
 
-# ================= STEP 4 =================
+# ================= STEP 5 =================
 # FETCH NEW TRACKS
 
 print("Fetching seed artists...")
@@ -460,7 +434,7 @@ for track in candidate_tracks:
     if popularity > 75:
         continue
 
-    new_tracks.append(track_id)
+    new_tracks.append(track["uri"])
 
     duration += track.get("duration_ms", 0)
 
@@ -469,18 +443,18 @@ for track in candidate_tracks:
 
 print(f"Selected new tracks: {len(new_tracks)}")
 
-# ================= STEP 5 =================
-# UPLOAD NEW TRACKS
+# ================= STEP 6 =================
+# ADD NEW TRACKS
 
 if new_tracks:
-    print("Uploading fresh discovery tracks...")
+    print("Uploading fresh tracks to discovery playlist...")
 
     add_tracks_to_playlist(
         DISCOVERY_PLAYLIST_ID,
         new_tracks,
     )
 
-    print("Upload complete")
+    print("Upload completed")
 
 else:
     print("No new tracks found")
