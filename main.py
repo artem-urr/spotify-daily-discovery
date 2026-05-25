@@ -1,9 +1,10 @@
 import os
 import random
 import time
+from urllib.parse import quote_plus
+
 import requests
 import spotipy
-
 from spotipy.oauth2 import SpotifyOAuth
 from spotipy.exceptions import SpotifyException
 
@@ -25,12 +26,10 @@ scope = (
 )
 
 redirect_uri = os.getenv("SPOTIPY_REDIRECT_URI")
-
 if not redirect_uri:
     raise RuntimeError("Missing SPOTIPY_REDIRECT_URI")
 
 refresh_token = os.getenv("SPOTIFY_REFRESH_TOKEN")
-
 if not refresh_token:
     raise RuntimeError("Missing SPOTIFY_REFRESH_TOKEN")
 
@@ -66,12 +65,10 @@ def spotify_call(func, *args, **kwargs):
 
         except SpotifyException as e:
             if e.http_status == 429:
-                retry_after = int(e.headers.get("Retry-After", 30))
-
+                retry_after = int(getattr(e, "headers", {}).get("Retry-After", 30))
                 print(f"Spotify rate limit. Sleep {retry_after}s")
                 time.sleep(retry_after + 2)
                 continue
-
             raise
 
         except Exception as e:
@@ -87,12 +84,11 @@ def chunked(items, size):
 def normalize_track(track):
     artist = track["artists"][0]["name"].strip().lower()
     title = track["name"].strip().lower()
-
     return f"{artist} - {title}"
 
 
-def get_playlist_tracks(playlist_id):
-    tracks = []
+def get_playlist_items(playlist_id):
+    items = []
     offset = 0
 
     while True:
@@ -101,25 +97,27 @@ def get_playlist_tracks(playlist_id):
             playlist_id,
             offset=offset,
             limit=100,
+            fields="items(track(id,uri,name,artists(name))),total,next",
         )
 
-        items = results.get("items", [])
-
-        if not items:
+        batch = results.get("items", [])
+        if not batch:
             break
 
-        for item in items:
-            track = item.get("track")
+        items.extend(batch)
+        offset += len(batch)
 
-            if not track:
-                continue
+    return items
 
-            if not track.get("id"):
-                continue
 
-            tracks.append(track)
+def get_playlist_tracks(playlist_id):
+    tracks = []
 
-        offset += 100
+    for item in get_playlist_items(playlist_id):
+        track = item.get("track")
+        if not track or not track.get("id"):
+            continue
+        tracks.append(track)
 
     return tracks
 
@@ -144,17 +142,15 @@ def get_liked_tracks():
         )
 
         items = results.get("items", [])
-
         if not items:
             break
 
         for item in items:
             track = item.get("track")
-
             if track and track.get("id"):
                 tracks.add(track["id"])
 
-        offset += 50
+        offset += len(items)
 
     return tracks
 
@@ -170,17 +166,17 @@ def get_lastfm_tracks():
         url = (
             "https://ws.audioscrobbler.com/2.0/"
             "?method=user.getrecenttracks"
-            f"&user={LASTFM_USERNAME}"
+            f"&user={quote_plus(LASTFM_USERNAME)}"
             f"&api_key={LASTFM_API_KEY}"
             "&format=json"
             "&limit=200"
         )
 
         response = requests.get(url, timeout=20)
+        response.raise_for_status()
         data = response.json()
 
         items = data.get("recenttracks", {}).get("track", [])
-
         if not items:
             print("Last.fm account empty")
             return tracks
@@ -188,7 +184,6 @@ def get_lastfm_tracks():
         for item in items:
             artist = item.get("artist", {}).get("#text", "").strip().lower()
             title = item.get("name", "").strip().lower()
-
             if artist and title:
                 tracks.add(f"{artist} - {title}")
 
@@ -206,7 +201,6 @@ def fetch_seed_artists():
         limit=20,
         time_range="short_term",
     )
-
     for artist in short.get("items", []):
         artist_map[artist["id"]] = artist
 
@@ -215,7 +209,6 @@ def fetch_seed_artists():
         limit=20,
         time_range="medium_term",
     )
-
     for artist in medium.get("items", []):
         artist_map[artist["id"]] = artist
 
@@ -223,21 +216,16 @@ def fetch_seed_artists():
         sp.current_user_recently_played,
         limit=30,
     )
-
     for item in recent.get("items", []):
         track = item.get("track")
-
         if not track:
             continue
-
         for artist in track.get("artists", []):
             if artist.get("id"):
                 artist_map[artist["id"]] = artist
 
     artists = list(artist_map.values())
-
     random.shuffle(artists)
-
     return artists[:20]
 
 
@@ -246,7 +234,6 @@ def fetch_candidates(seed_artists):
 
     for artist in seed_artists:
         artist_name = artist.get("name")
-
         if not artist_name:
             continue
 
@@ -256,21 +243,20 @@ def fetch_candidates(seed_artists):
             url = (
                 "https://ws.audioscrobbler.com/2.0/"
                 "?method=artist.getsimilar"
-                f"&artist={artist_name}"
+                f"&artist={quote_plus(artist_name)}"
                 f"&api_key={LASTFM_API_KEY}"
                 "&format=json"
                 "&limit=12"
             )
 
-            response = requests.get(url, timeout=20).json()
+            response = requests.get(url, timeout=20)
+            response.raise_for_status()
+            data = response.json()
 
-            similar_artists = (
-                response.get("similarartists", {}).get("artist", [])
-            )
+            similar_artists = data.get("similarartists", {}).get("artist", [])
 
             for sim in similar_artists:
                 sim_name = sim.get("name")
-
                 if not sim_name:
                     continue
 
@@ -281,11 +267,8 @@ def fetch_candidates(seed_artists):
                         type="track",
                         limit=5,
                     )
-
                     tracks = search.get("tracks", {}).get("items", [])
-
                     candidates.extend(tracks)
-
                     time.sleep(0.2)
 
                 except Exception as e:
@@ -295,168 +278,123 @@ def fetch_candidates(seed_artists):
             print(f"Similar artists failed for {artist_name}: {e}")
 
     unique = {}
-
     for track in candidates:
         track_id = track.get("id")
-
         if track_id:
             unique[track_id] = track
 
     return list(unique.values())
 
 
-def add_tracks_to_playlist(playlist_id, track_ids):
-    if not track_ids:
+def add_tracks_to_playlist(playlist_id, track_uris):
+    if not track_uris:
         return
 
-    print(f"Adding {len(track_ids)} tracks to playlist {playlist_id}")
-
-    for batch in chunked(track_ids, 100):
-        spotify_call(
-            sp.playlist_add_items,
-            playlist_id,
-            batch,
-        )
+    print(f"Adding {len(track_uris)} tracks to playlist {playlist_id}")
+    for batch in chunked(track_uris, 100):
+        spotify_call(sp.playlist_add_items, playlist_id, batch)
 
 
 def clear_playlist(playlist_id):
     current_tracks = get_playlist_tracks(playlist_id)
-
     if not current_tracks:
         print("Playlist already empty")
         return
 
     print(f"Clearing playlist: {len(current_tracks)} tracks")
-
-    spotify_call(
-        sp.playlist_replace_items,
-        playlist_id,
-        [],
-    )
-
+    spotify_call(sp.playlist_replace_items, playlist_id, [])
     print("Playlist cleared")
 
 
-# ================= STEP 1 =================
-# LOAD CURRENT DISCOVERY TRACKS
+def move_discovery_to_history():
+    print("Loading current discovery playlist...")
+    existing_discovery_tracks = get_playlist_tracks(DISCOVERY_PLAYLIST_ID)
+    existing_discovery_uris = [
+        track["uri"]
+        for track in existing_discovery_tracks
+        if track.get("uri")
+    ]
 
-print("Loading current discovery playlist...")
+    print(f"Current discovery tracks: {len(existing_discovery_uris)}")
 
-existing_discovery_tracks = get_playlist_tracks(
-    DISCOVERY_PLAYLIST_ID
-)
+    if existing_discovery_uris:
+        print("Archiving tracks to history playlist...")
+        add_tracks_to_playlist(HISTORY_PLAYLIST_ID, existing_discovery_uris)
+        print("Archive completed")
 
-existing_discovery_ids = [
-    track["uri"]
-    for track in existing_discovery_tracks
-    if track.get("uri")
-]
+        print("Clearing discovery playlist...")
+        clear_playlist(DISCOVERY_PLAYLIST_ID)
+    else:
+        print("Discovery playlist empty, nothing to archive")
 
-print(f"Current discovery tracks: {len(existing_discovery_ids)}")
 
-# ================= STEP 2 =================
-# ARCHIVE OLD TRACKS
+def build_blacklist():
+    history_track_ids = get_playlist_track_ids(HISTORY_PLAYLIST_ID)
+    liked_tracks = get_liked_tracks()
+    blacklist = history_track_ids | liked_tracks
+    print(f"Blacklist size: {len(blacklist)}")
+    return blacklist
 
-if existing_discovery_ids:
-    print("Archiving tracks to history playlist...")
 
-    add_tracks_to_playlist(
-        HISTORY_PLAYLIST_ID,
-        existing_discovery_ids,
-    )
+def generate_new_discovery():
+    blacklist = build_blacklist()
 
-    print("Archive completed")
+    print("Fetching seed artists...")
+    seed_artists = fetch_seed_artists()
+    print(f"Seed artists: {len(seed_artists)}")
 
-else:
-    print("Discovery playlist empty, nothing to archive")
+    print("Fetching candidate tracks...")
+    candidate_tracks = fetch_candidates(seed_artists)
+    print(f"Candidate tracks: {len(candidate_tracks)}")
 
-# ================= STEP 3 =================
-# CLEAR DISCOVERY PLAYLIST
+    random.shuffle(candidate_tracks)
 
-print("Clearing discovery playlist...")
+    print("Loading Last.fm history...")
+    lastfm_tracks = get_lastfm_tracks()
 
-clear_playlist(DISCOVERY_PLAYLIST_ID)
+    new_tracks = []
+    duration = 0
 
-# ================= STEP 4 =================
-# BUILD BLACKLIST
+    for track in candidate_tracks:
+        track_id = track.get("id")
+        if not track_id:
+            continue
+        if track_id in blacklist:
+            continue
+        if normalize_track(track) in lastfm_tracks:
+            continue
 
-history_track_ids = get_playlist_track_ids(
-    HISTORY_PLAYLIST_ID
-)
+        popularity = track.get("popularity", 0)
+        if popularity > 75:
+            continue
 
-liked_tracks = get_liked_tracks()
+        uri = track.get("uri")
+        if not uri or uri in new_tracks:
+            continue
 
-blacklist = (
-    history_track_ids
-    | liked_tracks
-)
+        new_tracks.append(uri)
+        duration += track.get("duration_ms", 0)
 
-print(f"Blacklist size: {len(blacklist)}")
+        if duration >= 2 * 60 * 60 * 1000:
+            break
 
-# ================= STEP 5 =================
-# FETCH NEW TRACKS
+    print(f"Selected new tracks: {len(new_tracks)}")
 
-print("Fetching seed artists...")
+    if new_tracks:
+        print("Uploading fresh tracks to discovery playlist...")
+        spotify_call(sp.playlist_replace_items, DISCOVERY_PLAYLIST_ID, new_tracks[:100])
+        for batch in chunked(new_tracks[100:], 100):
+            spotify_call(sp.playlist_add_items, DISCOVERY_PLAYLIST_ID, batch)
+        print("Upload completed")
+    else:
+        print("No new tracks found")
 
-seed_artists = fetch_seed_artists()
 
-print(f"Seed artists: {len(seed_artists)}")
+def main():
+    move_discovery_to_history()
+    generate_new_discovery()
+    print("Done.")
 
-print("Fetching candidate tracks...")
 
-candidate_tracks = fetch_candidates(seed_artists)
-
-print(f"Candidate tracks: {len(candidate_tracks)}")
-
-random.shuffle(candidate_tracks)
-
-print("Loading Last.fm history...")
-
-lastfm_tracks = get_lastfm_tracks()
-
-new_tracks = []
-duration = 0
-
-for track in candidate_tracks:
-    track_id = track.get("id")
-
-    if not track_id:
-        continue
-
-    if track_id in blacklist:
-        continue
-
-    if normalize_track(track) in lastfm_tracks:
-        continue
-
-    popularity = track.get("popularity", 0)
-
-    if popularity > 75:
-        continue
-
-    new_tracks.append(track["uri"])
-
-    duration += track.get("duration_ms", 0)
-
-    if duration >= 2 * 60 * 60 * 1000:
-        break
-
-print(f"Selected new tracks: {len(new_tracks)}")
-
-# ================= STEP 6 =================
-# ADD NEW TRACKS
-
-if new_tracks:
-    print("Uploading fresh tracks to discovery playlist...")
-
-    add_tracks_to_playlist(
-        DISCOVERY_PLAYLIST_ID,
-        new_tracks,
-    )
-
-    print("Upload completed")
-
-else:
-    print("No new tracks found")
-
-print("Done.")
+if __name__ == "__main__":
+    main()
