@@ -212,4 +212,4 @@ def fetch_seed_artists():
 
     medium = spotify_call(
         sp.current_user_top_artists,
-        
+    )
