@@ -219,23 +219,26 @@ def add_tracks_to_playlist(playlist_id, track_uris):
     print(f"✅ Added {len(track_uris)} tracks")
 
 def clear_playlist(playlist_id):
-    # Сначала проверяем, есть ли треки
     current = get_playlist_tracks(playlist_id)
     if not current:
         print(f"Playlist {playlist_id} already empty")
         return
     print(f"🧹 Clearing playlist {playlist_id}: {len(current)} tracks")
-    # Используем playlist_replace_items с пустым списком, обёрнутый в spotify_call
     spotify_call(sp.playlist_replace_items, playlist_id, [])
-    # Проверяем, что очистка действительно произошла
-    time.sleep(2)  # даём время API обновиться
+    time.sleep(2)
     after_check = get_playlist_tracks(playlist_id)
     if after_check:
-        print(f"⚠️ Replace didn't fully clear, removing tracks individually")
+        print(f"⚠️ Replace didn't fully clear, removing individually")
         uris = [t["uri"] for t in after_check if t.get("uri")]
         for batch in chunked(uris, 100):
             spotify_call(sp.playlist_remove_all_occurrences_of_items, playlist_id, batch)
     print(f"✅ Playlist {playlist_id} cleared")
+
+def verify_tracks_added(playlist_id, expected_uris):
+    """Проверяет, что все треки из списка присутствуют в плейлисте."""
+    current_ids = get_playlist_track_ids(playlist_id)
+    expected_ids = {uri.split(":")[-1] for uri in expected_uris}
+    return expected_ids.issubset(current_ids)
 
 # ================= MAIN =================
 
@@ -248,16 +251,22 @@ def main():
     existing_discovery_uris = [t["uri"] for t in existing_discovery_tracks if t.get("uri")]
     print(f"Found {len(existing_discovery_uris)} tracks in discovery")
 
-    # STEP 2 – архивировать их в history
+    # STEP 2 – архивировать их в history (только если есть треки)
     if existing_discovery_uris:
         print("📦 Archiving to history playlist...")
         add_tracks_to_playlist(HISTORY_PLAYLIST_ID, existing_discovery_uris)
-        # Небольшая пауза, чтобы запись точно завершилась
-        time.sleep(1)
+
+        # Проверим, что треки действительно добавились
+        time.sleep(2)
+        if not verify_tracks_added(HISTORY_PLAYLIST_ID, existing_discovery_uris):
+            print("❌ CRITICAL: Failed to archive tracks to history. Aborting to avoid data loss.")
+            return  # Не очищаем discovery и не добавляем новые треки
+
+        print("✅ Archive verified")
     else:
         print("Discovery is empty, nothing to archive")
 
-    # STEP 3 – очистить discovery
+    # STEP 3 – очистить discovery (только после успешной архивации)
     print("🗑️ Clearing discovery playlist...")
     clear_playlist(DISCOVERY_PLAYLIST_ID)
 
